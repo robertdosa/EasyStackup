@@ -1,0 +1,7 @@
+# EasyStackup runtime dependencies
+# Install:  python -m pip install -r requirements.txt
+# Python 3.10+ recommended (developed with 3.14)
+
+customtkinter==6.0.0
+Pillow==12.3.0
+reportlab==5.0.0

@@ -1,0 +1,67 @@
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Type checkers / test caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local project / export artifacts (any folder)
+*.eysp
+
+# Exports dumped at repo root only (docs/ and assets/ stay trackable)
+/*.pdf
+/*.PDF
+/*.svg
+/*.SVG
+/*.png
+/*.PNG
+/*.jpg
+/*.JPG
+/*.jpeg
+/*.JPEG
+/*.ico
+/*.ICO
+# Keep the real app icon under assets/ (root /*.ico would not affect it)
+
+# Logs and temp
+*.log
+tmp/
+temp/
+*.tmp
