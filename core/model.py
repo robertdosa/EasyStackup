@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from core.units import UNIT_MM, format_length, normalize_unit
 
@@ -88,6 +88,11 @@ class Project:
         self.title = "New Stackup"
         # Display preference only; stored values are always millimetres
         self.display_unit: str = UNIT_MM
+        # Last WC/RSS snapshot and last Monte Carlo run (JSON-safe dicts, mm)
+        self.calculation: Optional[Dict[str, Any]] = None
+        self.monte_carlo: Optional[Dict[str, Any]] = None
+        # When True and a Monte Carlo snapshot exists, PDF export includes it.
+        self.include_mc_in_pdf: bool = True
 
     def add_arrow(self, nominal: float, tolerance: float = 0.0, direction: int = 1,
                   name: str = "", start_x: float = 0, start_y: float = 0,
@@ -149,7 +154,10 @@ class Project:
             "title": self.title,
             "next_id": self.next_id,
             "display_unit": normalize_unit(self.display_unit),
-            "arrows": [vars(a) for a in self.arrows]
+            "arrows": [vars(a) for a in self.arrows],
+            "calculation": self.calculation,
+            "monte_carlo": self.monte_carlo,
+            "include_mc_in_pdf": bool(self.include_mc_in_pdf),
         }
 
     @classmethod
@@ -175,4 +183,10 @@ class Project:
         # Avoid duplicate IDs if the file's next_id is missing, stale, or below max id
         max_id = max((a.id for a in proj.arrows), default=0)
         proj.next_id = max(proj.next_id, max_id + 1, 1)
+        calc = data.get("calculation")
+        proj.calculation = calc if isinstance(calc, dict) else None
+        mc = data.get("monte_carlo")
+        proj.monte_carlo = mc if isinstance(mc, dict) else None
+        if "include_mc_in_pdf" in data:
+            proj.include_mc_in_pdf = bool(data.get("include_mc_in_pdf"))
         return proj

@@ -8,7 +8,7 @@ from typing import Any, Dict, Tuple
 
 from core.model import Project
 
-FILE_VERSION = 1
+FILE_VERSION = 2
 DEFAULT_EXTENSION = ".eysp"
 
 # Model-space X of the datum face for a new / empty loop diagram.
@@ -47,6 +47,15 @@ def load_project(path: str | Path) -> Tuple[Project, Dict[str, Any]]:
         raise ValueError("Invalid project file: expected a JSON object.")
 
     project = Project.from_dict(raw)
+    if project.monte_carlo is not None:
+        try:
+            from core.monte_carlo import MonteCarloResult
+
+            project.monte_carlo = MonteCarloResult.from_dict(project.monte_carlo).to_dict()
+        except Exception:
+            project.monte_carlo = None
+    if project.calculation is not None and "nominal" not in project.calculation:
+        project.calculation = None
     meta = {
         "version": raw.get("version", 1),
         "original_start_x": float(raw.get("original_start_x", DEFAULT_ORIGIN_X)),

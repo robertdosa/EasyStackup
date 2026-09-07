@@ -249,7 +249,7 @@ class DimensionDialog(ctk.CTkToplevel):
                 self.iso_preview.configure(text="Enter nominal to preview ISO limits.")
                 return
             # ISO tables are millimetre-based; convert entry → mm for lookup
-            nominal_mm = from_display(float(nom_str), self.display_unit)
+            nominal_mm = from_display(float(nom_str.replace(",", ".")), self.display_unit)
             desig = self.iso_desig_menu.get()
             lower, upper = deviations_for(desig, nominal_mm)
             mean = (upper + lower) / 2.0
@@ -266,6 +266,8 @@ class DimensionDialog(ctk.CTkToplevel):
                     f"equiv. ±{format_length(half, self.display_unit, decimals=4)}"
                 )
             )
+        except ValueError:
+            self.iso_preview.configure(text="Enter nominal to preview ISO limits.")
         except Exception as exc:
             self.iso_preview.configure(text=f"ISO lookup: {exc}")
 
@@ -276,8 +278,8 @@ class DimensionDialog(ctk.CTkToplevel):
                 messagebox.showwarning("Missing values", "Please enter Nominal.", parent=self)
                 return
 
-            # Convert display entry → stored mm
-            nominal = from_display(float(nominal_str), self.display_unit)
+            # Convert display entry → stored mm (comma or dot decimal)
+            nominal = from_display(float(nominal_str.replace(",", ".")), self.display_unit)
             if nominal <= 0:
                 messagebox.showwarning("Invalid Nominal", "Nominal must be greater than 0.", parent=self)
                 return
@@ -290,7 +292,7 @@ class DimensionDialog(ctk.CTkToplevel):
                 if not tol_str:
                     messagebox.showwarning("Missing values", "Please enter Tolerance (±).", parent=self)
                     return
-                tol = from_display(float(tol_str), self.display_unit)
+                tol = from_display(float(tol_str.replace(",", ".")), self.display_unit)
                 if tol < 0:
                     messagebox.showwarning("Invalid Tolerance", "Tolerance cannot be negative.", parent=self)
                     return
@@ -315,8 +317,8 @@ class DimensionDialog(ctk.CTkToplevel):
                         parent=self,
                     )
                     return
-                upper = from_display(float(up_str), self.display_unit)
-                lower = from_display(float(lo_str), self.display_unit)
+                upper = from_display(float(up_str.replace(",", ".")), self.display_unit)
+                lower = from_display(float(lo_str.replace(",", ".")), self.display_unit)
                 if lower > upper:
                     messagebox.showwarning(
                         "Invalid limits",

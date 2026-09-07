@@ -7,6 +7,7 @@ Layout:
   2. Dimensions table (flows across pages)
   3. Stack-up results
   4. Tolerance contribution
+  5. Monte Carlo (optional — only when a run exists and the user opted in)
   Notes + footer with page numbers
 """
 
@@ -22,17 +23,19 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import (
+    Flowable,
     Image,
+    KeepTogether,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
     Table,
     TableStyle,
-    Flowable,
 )
 
 from core.model import Project
-from core.units import UNIT_IN, format_length, normalize_unit
+from core.monte_carlo import RESULT_PERCENTILES, MonteCarloResult
+from core.units import UNIT_IN, format_length, normalize_unit, unit_label
 
 
 # Engineering-report palette
@@ -76,6 +79,370 @@ class _ContributionBar(Flowable):
             self.canv.roundRect(0, 1, fill_w, self.bar_height, 2, fill=1, stroke=0)
 
 
+_MC_DIST_LABEL = {
+    "normal": "Normal",
+    "uniform": "Uniform",
+    "triangular": "Triangular",
+}
+_MC_MEAN = colors.HexColor("#16a34a")
+_MC_RSS = colors.HexColor("#d97706")
+_MC_WC = colors.HexColor("#dc2626")
+_MC_ZERO = colors.HexColor("#475569")
+_MC_SPEC = colors.HexColor("#7c3aed")
+_MC_BAR = colors.HexColor("#0284c7")
+_MC_GRID = colors.HexColor("#e2e8f0")
+_MC_AXIS = colors.HexColor("#64748b")
+
+
+class _McHistogram(Flowable):
+    """Print-friendly histogram of simulated clearance (from stored bin counts)."""
+
+    def __init__(
+        self,
+        result: MonteCarloResult,
+        unit: str,
+        width: float = 170 * mm,
+        height: float = 52 * mm,
+    ):
+        super().__init__()
+        self.result = result
+        self.unit = unit
+        self.width = width
+        self.height = height
+
+    def wrap(self, availWidth, availHeight):
+        return (self.width, self.height)
+
+    def draw(self):
+        r = self.result
+        edges = list(r.hist_edges)
+        counts = list(r.hist_counts)
+        if len(edges) < 2 or not counts:
+            return
+        c = self.canv
+        pad_l, pad_r, pad_t, pad_b = 10, 8, 8, 16
+        x0, y0 = pad_l, pad_b
+        x1, y1 = self.width - pad_r, self.height - pad_t
+        plot_w = x1 - x0
+        plot_h = y1 - y0
+        if plot_w < 20 or plot_h < 16:
+            return
+
+        data_lo, data_hi = edges[0], edges[-1]
+        span = data_hi - data_lo
+        pad = span * 0.04 if span > 0 else 1e-6
+        view_lo, view_hi = data_lo - pad, data_hi + pad
+        y_max = max(counts) * 1.12 if max(counts) > 0 else 1.0
+
+        def x_to_px(xv_mm: float) -> float:
+            t = (xv_mm - view_lo) / (view_hi - view_lo) if view_hi > view_lo else 0.5
+            return x0 + t * plot_w
+
+        def y_to_px(count: float) -> float:
+            return y0 + (count / y_max) * plot_h if y_max else y0
+
+        c.setFillColor(colors.HexColor("#f8fafc"))
+        c.rect(x0, y0, plot_w, plot_h, fill=1, stroke=0)
+        c.setStrokeColor(_MC_GRID)
+        c.setLineWidth(0.4)
+        for i in range(1, 4):
+            yy = y0 + plot_h * i / 4
+            c.line(x0, yy, x1, yy)
+
+        c.setFillColor(_MC_BAR)
+        c.setStrokeColor(colors.HexColor("#0369a1"))
+        c.setLineWidth(0.3)
+        n = min(len(counts), len(edges) - 1)
+        for i in range(n):
+            if counts[i] <= 0:
+                continue
+            bx0 = x_to_px(edges[i])
+            bx1 = x_to_px(edges[i + 1])
+            if bx1 <= bx0:
+                bx1 = bx0 + 0.6
+            top = y_to_px(counts[i])
+            c.rect(bx0, y0, bx1 - bx0, max(0.4, top - y0), fill=1, stroke=1)
+
+        def vline(xv_mm: float, color, dash=None, width: float = 0.8):
+            if xv_mm < view_lo or xv_mm > view_hi:
+                return
+            px = x_to_px(xv_mm)
+            c.setStrokeColor(color)
+            c.setLineWidth(width)
+            if dash:
+                c.setDash(dash)
+            else:
+                c.setDash()
+            c.line(px, y0, px, y1)
+            c.setDash()
+
+        vline(r.mean, _MC_MEAN, width=1.1)
+        vline(0.0, _MC_ZERO, dash=[3, 2], width=0.6)
+        vline(r.rss_min, _MC_RSS, dash=[4, 2], width=0.7)
+        vline(r.rss_max, _MC_RSS, dash=[4, 2], width=0.7)
+        vline(r.wc_min, _MC_WC, dash=[2, 2], width=0.7)
+        vline(r.wc_max, _MC_WC, dash=[2, 2], width=0.7)
+        if r.lsl is not None:
+            vline(r.lsl, _MC_SPEC, dash=[5, 2], width=1.0)
+        if r.usl is not None:
+            vline(r.usl, _MC_SPEC, dash=[5, 2], width=1.0)
+
+        c.setStrokeColor(_SLATE)
+        c.setLineWidth(0.7)
+        c.rect(x0, y0, plot_w, plot_h, fill=0, stroke=1)
+
+        n_ticks = 5
+        c.setFillColor(_MC_AXIS)
+        c.setFont("Helvetica", 6)
+        for i in range(n_ticks + 1):
+            xv = view_lo + (view_hi - view_lo) * i / n_ticks
+            px = x_to_px(xv)
+            c.setStrokeColor(_MC_AXIS)
+            c.setLineWidth(0.5)
+            c.line(px, y0, px, y0 - 3)
+            label = format_length(xv, self.unit, signed=True)
+            if i == 0:
+                c.drawString(px, y0 - 11, label)
+            elif i == n_ticks:
+                c.drawRightString(px, y0 - 11, label)
+            else:
+                c.drawCentredString(px, y0 - 11, label)
+
+        ul = unit_label(self.unit)
+        c.drawCentredString((x0 + x1) / 2, 1, f"Clearance ({ul})")
+
+
+def parse_monte_carlo(raw: Any) -> Optional[MonteCarloResult]:
+    """Accept a MonteCarloResult, a saved dict, or None."""
+    if raw is None:
+        return None
+    if isinstance(raw, MonteCarloResult):
+        return raw
+    if isinstance(raw, dict):
+        try:
+            return MonteCarloResult.from_dict(raw)
+        except Exception:
+            return None
+    return None
+
+
+def _pdf_kv_table(
+    rows: List[List[Any]],
+    col_widths: List[float],
+    header_row: bool = True,
+) -> Table:
+    table = Table(rows, colWidths=col_widths)
+    cmds = [
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("GRID", (0, 0), (-1, -1), 0.4, _GRID),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3.5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+    ]
+    if header_row:
+        cmds.extend(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), _HEADER_BG),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+            ]
+        )
+        start = 1
+    else:
+        start = 0
+    for i in range(start, len(rows)):
+        if (i - start) % 2 == 1:
+            cmds.append(("BACKGROUND", (0, i), (-1, i), _ROW_ALT))
+        cmds.append(("ALIGN", (1, i), (-1, i), "RIGHT"))
+    table.setStyle(TableStyle(cmds))
+    return table
+
+
+def _append_monte_carlo_section(
+    story: List[Any],
+    result: MonteCarloResult,
+    unit: str,
+    unit_name: str,
+    style_h2,
+    style_note,
+    style_cell,
+    style_cell_header,
+) -> None:
+    dist = _MC_DIST_LABEL.get(result.distribution, result.distribution)
+    bits = [f"{result.n_trials:,} trials", dist]
+    if result.n_sigma is not None:
+        bits.append(f"±{result.n_sigma:g}σ")
+        if result.truncate:
+            bits.append("truncated to the tolerance band")
+    bits.append(f"seed {result.seed}")
+
+    story.append(Paragraph("5. Monte Carlo simulation", style_h2))
+    story.append(
+        Paragraph(
+            "Each contributing dimension is sampled, then stacked with the same "
+            "+ gap / − interference sign as Calculate. "
+            + "  ·  ".join(bits) + ".",
+            style_note,
+        )
+    )
+    story.append(Spacer(1, 2 * mm))
+
+    if result.hist_counts and len(result.hist_edges) >= 2:
+        story.append(
+            KeepTogether(
+                [
+                    _McHistogram(result, unit),
+                    Paragraph(
+                        "Green = mean &nbsp;&nbsp;·&nbsp;&nbsp; Orange dashed = RSS "
+                        "&nbsp;&nbsp;·&nbsp;&nbsp; Red dashed = WC "
+                        "&nbsp;&nbsp;·&nbsp;&nbsp; Grey dashed = line-to-line (0)"
+                        + (
+                            " &nbsp;&nbsp;·&nbsp;&nbsp; Purple dashed = spec limits"
+                            if (result.lsl is not None or result.usl is not None)
+                            else ""
+                        ),
+                        style_note,
+                    ),
+                ]
+            )
+        )
+        story.append(Spacer(1, 2.5 * mm))
+
+    def cell(text: str) -> Paragraph:
+        return Paragraph(text, style_cell)
+
+    def head(*labels: str) -> List[Paragraph]:
+        return [Paragraph(t, style_cell_header) for t in labels]
+
+    fmt = lambda v, signed=True: format_length(v, unit, signed=signed, decimals=4)
+
+    dist_rows = [
+        head("Quantity", f"Value [{unit_name}]"),
+        [cell("Mean"), cell(fmt(result.mean))],
+        [cell("Std dev"), cell(fmt(result.std, signed=False))],
+        [cell("Min"), cell(fmt(result.min_val))],
+        [cell("Max"), cell(fmt(result.max_val))],
+    ]
+    story.append(_pdf_kv_table(dist_rows, [50 * mm, 40 * mm]))
+    story.append(Spacer(1, 2.5 * mm))
+
+    pct_rows = [head("Percentile", f"Clearance [{unit_name}]")]
+    for p in RESULT_PERCENTILES:
+        val = result.percentiles.get(p)
+        if val is None:
+            continue
+        label = f"P{p:g}" if p != 50.0 else "P50 (median)"
+        pct_rows.append([cell(label), cell(fmt(val))])
+    story.append(_pdf_kv_table(pct_rows, [50 * mm, 40 * mm]))
+    story.append(Spacer(1, 2.5 * mm))
+
+    assembly = [
+        head("Assembly", "Share"),
+        [cell("Gap (> 0)"), cell(f"{result.pct_gap:.2f} %")],
+        [cell("Interference (< 0)"), cell(f"{result.pct_interference:.2f} %")],
+        [cell("Line-to-line"), cell(f"{result.pct_line_to_line:.2f} %")],
+    ]
+    if result.yield_pct is not None:
+        assembly.append([cell("Yield vs spec"), cell(f"{result.yield_pct:.2f} %")])
+    if result.pct_below_lsl is not None:
+        assembly.append([cell("Below LSL"), cell(f"{result.pct_below_lsl:.2f} %")])
+    if result.pct_above_usl is not None:
+        assembly.append([cell("Above USL"), cell(f"{result.pct_above_usl:.2f} %")])
+    if result.lsl is not None:
+        assembly.append([cell(f"LSL [{unit_name}]"), cell(fmt(result.lsl))])
+    if result.usl is not None:
+        assembly.append([cell(f"USL [{unit_name}]"), cell(fmt(result.usl))])
+    story.append(_pdf_kv_table(assembly, [50 * mm, 40 * mm]))
+    story.append(Spacer(1, 2.5 * mm))
+
+    p_lo = result.percentiles.get(0.135, result.min_val)
+    p_hi = result.percentiles.get(99.865, result.max_val)
+    cmp_rows = [
+        head("Method", "Min", "Max"),
+        [cell("WC"), cell(fmt(result.wc_min)), cell(fmt(result.wc_max))],
+        [cell("RSS"), cell(fmt(result.rss_min)), cell(fmt(result.rss_max))],
+        [cell("MC ±3σ (P0.135 / P99.865)"), cell(fmt(p_lo)), cell(fmt(p_hi))],
+    ]
+    story.append(_pdf_kv_table(cmp_rows, [55 * mm, 40 * mm, 40 * mm]))
+    story.append(
+        Paragraph(
+            "MC ±3σ uses the simulated P0.135 / P99.865 percentiles (≈ ±3σ of a normal).",
+            style_note,
+        )
+    )
+    story.append(Spacer(1, 2.5 * mm))
+
+    story.append(
+        Paragraph(
+            "Variance contribution (share of simulated stack variance).",
+            style_note,
+        )
+    )
+    story.append(Spacer(1, 1.2 * mm))
+    ordered = sorted(
+        result.contributions or [],
+        key=lambda c: float(c.get("percent", 0)),
+        reverse=True,
+    )
+    if ordered:
+        contrib_data: List[List[Any]] = [
+            head("Dimension", "Contribution", "%")
+        ]
+        for i, item in enumerate(ordered):
+            cid = item.get("id", "?")
+            name = (item.get("name") or "").strip()
+            label = f"L{cid}" + (f"  ({name})" if name else "")
+            pct = float(item.get("percent", 0))
+            bar_color = _CONTRIB_COLORS[i % len(_CONTRIB_COLORS)]
+            contrib_data.append(
+                [
+                    cell(label),
+                    _ContributionBar(pct, bar_color, width=95, height=7),
+                    cell(f"{pct:.1f}%"),
+                ]
+            )
+        contrib_table = Table(contrib_data, colWidths=[70 * mm, 100 * mm, 18 * mm])
+        c_style = [
+            ("BACKGROUND", (0, 0), (-1, 0), _HEADER_BG),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.35, _GRID),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+            ("ALIGN", (2, 1), (2, -1), "RIGHT"),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ]
+        for i in range(1, len(contrib_data)):
+            if i % 2 == 0:
+                c_style.append(("BACKGROUND", (0, i), (-1, i), _ROW_ALT))
+        contrib_table.setStyle(TableStyle(c_style))
+        story.append(contrib_table)
+    else:
+        story.append(Paragraph("No variance contribution data.", style_note))
+
+    for warning in result.warnings or []:
+        story.append(Spacer(1, 1.5 * mm))
+        story.append(
+            Paragraph(
+                f"<b>Note:</b> {warning}",
+                ParagraphStyle(
+                    "McWarnNote",
+                    parent=style_note,
+                    textColor=colors.HexColor("#b45309"),
+                    leading=11,
+                ),
+            )
+        )
+    story.append(Spacer(1, 3 * mm))
+
+
 def _display_unit_name(unit: str | None) -> str:
     """User-facing unit word for report headings: mm | inch."""
     return "inch" if normalize_unit(unit) == UNIT_IN else "mm"
@@ -109,6 +476,7 @@ def export_pdf_report(
     project_name: Optional[str] = None,
     revision: str = "-",
     creator: str = "",
+    monte_carlo: Optional[Any] = None,
 ) -> Path:
     """
     Write a multi-page A4 PDF report.
@@ -117,6 +485,8 @@ def export_pdf_report(
     diagram_image_path: optional PNG/JPEG of the loop diagram at current view.
     project_name: optional override for the report "Project" field (and PDF title).
         If omitted/empty, falls back to project.title, then "New Stackup".
+    monte_carlo: optional MonteCarloResult or saved dict; omitted when the user
+        did not opt in or no run has been stored.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -498,6 +868,20 @@ def export_pdf_report(
 
     story.append(Spacer(1, 5 * mm))
 
+    # ---- 5. Monte Carlo (optional) ----
+    mc_result = parse_monte_carlo(monte_carlo)
+    if mc_result is not None and mc_result.n_trials > 0:
+        _append_monte_carlo_section(
+            story,
+            mc_result,
+            unit,
+            unit_name,
+            style_h2,
+            style_note,
+            style_cell,
+            style_cell_header,
+        )
+
     # ---- Notes ----
     story.append(Paragraph("Notes", style_h2))
     notes = [
@@ -507,6 +891,12 @@ def export_pdf_report(
         "Reported clearance / WC / RSS use mean sizes (mid of each tolerance band).",
         "• Report generated by EasyStackup.",
     ]
+    if mc_result is not None and mc_result.n_trials > 0:
+        notes.insert(
+            3,
+            "• Monte Carlo uses assumed distributions (not measured process data); "
+            "results vary with trial count and seed.",
+        )
     for line in notes:
         story.append(Paragraph(line, style_note))
 

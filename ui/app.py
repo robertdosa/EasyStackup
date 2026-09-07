@@ -19,6 +19,13 @@ from ui.about_dialog import AboutDialog
 from ui.dimension_dialog import DimensionDialog
 from ui.options_dialog import OptionsDialog
 from ui.pdf_export_dialog import PdfExportDialog
+from ui.monte_carlo_dialog import MonteCarloDialog
+
+# Canvas zoom. Fit-on-open may use the full range; mouse ＋/－ stay inside it.
+_MIN_ZOOM = 0.4
+_MAX_ZOOM = 8.0
+# Fraction of the canvas kept as empty margin when fitting a loaded loop.
+_FIT_MARGIN = 0.14
 
 
 class EasyStackupApp:
@@ -61,6 +68,7 @@ class EasyStackupApp:
         self.zoom = 1.0
         self.offset_x = 0.0
         self.offset_y = 0.0
+        self._fit_pending = False
         self.is_panning = False
         self.pan_start_x = 0
         self.pan_start_y = 0
@@ -86,6 +94,8 @@ class EasyStackupApp:
         try:
             self.root.unbind("<Delete>")
             self.root.unbind("<BackSpace>")
+            self.root.unbind_all("<Control-s>")
+            self.root.unbind_all("<Control-S>")
         except Exception:
             pass
         # Native menubar lives on the root, not as a packed child
@@ -126,8 +136,7 @@ class EasyStackupApp:
 
     def _create_menubar(self):
         """
-        Native Windows-style menu bar (File / Export / Help).
-        Commands are stubs for now; wire real handlers later.
+        Native Windows-style menu bar (File / Export / Simulation / Help).
         """
         menubar = tk.Menu(self.root)
 
@@ -136,7 +145,9 @@ class EasyStackupApp:
         file_menu.add_command(label="New project", command=self._menu_new_project)
         file_menu.add_command(label="Open project", command=self._menu_open_project)
         file_menu.add_separator()
-        file_menu.add_command(label="Save", command=self.save_project_file)
+        file_menu.add_command(
+            label="Save", command=self.save_project_file, accelerator="Ctrl+S"
+        )
         file_menu.add_command(label="Save As…", command=self.save_project_as)
         file_menu.add_separator()
         file_menu.add_command(label="Options", command=self._menu_options)
@@ -150,6 +161,14 @@ class EasyStackupApp:
         export_menu.add_command(label="Export loop diagram as PNG", command=self._menu_export_png)
         export_menu.add_command(label="Export loop diagram as SVG", command=self._menu_export_svg)
         menubar.add_cascade(label="Export", menu=export_menu)
+
+        # --- Simulation ---
+        sim_menu = tk.Menu(menubar, tearoff=0)
+        sim_menu.add_command(
+            label="Monte Carlo Simulation",
+            command=self._menu_monte_carlo,
+        )
+        menubar.add_cascade(label="Simulation", menu=sim_menu)
 
         # --- Help ---
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -231,6 +250,30 @@ class EasyStackupApp:
         dialog = AboutDialog(self.root)
         self.root.wait_window(dialog)
 
+    def _menu_monte_carlo(self):
+        """Open the Monte Carlo simulation window for the current closed loop."""
+        if not self.project.arrows:
+            messagebox.showwarning(
+                "Nothing to simulate",
+                "Add at least one dimension before running a simulation.",
+                parent=self.root,
+            )
+            return
+
+        if not self.has_gap:
+            messagebox.showwarning(
+                "Loop not closed",
+                "Close the loop (Add Clearance) before running a Monte Carlo "
+                "simulation.\nStack-up results require a closed loop.",
+                parent=self.root,
+            )
+            return
+
+        dialog = MonteCarloDialog(self.root, project=self.project)
+        self.root.wait_window(dialog)
+        if getattr(dialog, "saved", False):
+            self._mark_dirty()
+
     def _menu_export_pdf(self):
         """
         Open export dialog, auto-calculate, capture the current canvas view,
@@ -303,6 +346,9 @@ class EasyStackupApp:
         diagram_path = None
         try:
             diagram_path = self._capture_canvas_image()
+            mc_payload = None
+            if getattr(self.project, "include_mc_in_pdf", True) and self.project.monte_carlo:
+                mc_payload = self.project.monte_carlo
             export_pdf_report(
                 out_path,
                 self.project,
@@ -312,6 +358,7 @@ class EasyStackupApp:
                 project_name=project_name,
                 revision=revision,
                 creator=creator,
+                monte_carlo=mc_payload,
             )
         except Exception as exc:
             messagebox.showerror(
@@ -857,8 +904,8 @@ class EasyStackupApp:
         self.canvas.bind("<ButtonRelease-1>", self.end_draw)
         self.canvas.bind("<Motion>", self.on_canvas_motion)
         self.canvas.bind("<Leave>", self._on_canvas_leave)
-        # Keep fixed overlays pinned when the canvas is resized
-        self.canvas.bind("<Configure>", lambda e: self._draw_fixed_overlays())
+        # Keep fixed overlays pinned when the canvas is resized; also run pending fit-on-open
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
 
         self.draw_positive_indicator()
 
@@ -895,8 +942,8 @@ class EasyStackupApp:
         # Columns stretch across the sidebar; no horizontal scrollbar
         self.tree.column("id", width=48, minwidth=40, anchor="center", stretch=False)
         self.tree.column("name", width=120, minwidth=70, anchor="w", stretch=True)
-        self.tree.column("nominal", width=60, minwidth=90, anchor="e", stretch=True)
-        self.tree.column("mean", width=60, minwidth=90, anchor="e", stretch=True)
+        self.tree.column("nominal", width=90, minwidth=70, anchor="e", stretch=True)
+        self.tree.column("mean", width=90, minwidth=70, anchor="e", stretch=True)
         self.tree.column("tolerance", width=90, minwidth=100, anchor="center", stretch=False)
         self.tree.column("equal_bilateral", width=150, minwidth=110, anchor="center", stretch=True)
 
@@ -930,8 +977,10 @@ class EasyStackupApp:
         self.canvas.bind("<B2-Motion>", self.during_pan)        # Middle button drag
         self.canvas.bind("<ButtonRelease-2>", self.end_pan)     # Middle button release
 
-        self.root.bind("<Delete>", lambda e: self.delete_selected())
-        self.root.bind("<BackSpace>", lambda e: self.delete_selected())
+        self.root.bind("<Delete>", self._on_delete_key)
+        self.root.bind("<BackSpace>", self._on_delete_key)
+        self.root.bind_all("<Control-s>", self._on_ctrl_s)
+        self.root.bind_all("<Control-S>", self._on_ctrl_s)
         self.canvas.bind("<Double-1>", self.on_canvas_double_click)
 
     def _sync_geometry_from_project(self):
@@ -946,8 +995,15 @@ class EasyStackupApp:
                 self.current_face_x = None
             else:
                 self._restore_active_face()
-        self.redraw_canvas()
         self.update_ui()
+        if self.has_gap and isinstance(self.project.calculation, dict):
+            self._render_calculation(self.project.calculation)
+        # Loaded files: wait until the canvas has a real size, then fit the loop.
+        if self.file_path and self.project.arrows:
+            self._fit_pending = True
+            self.root.after_idle(self._try_fit_loop_in_view)
+            return
+        self.redraw_canvas()
 
     def on_tree_select(self, event):
         sel = self.tree.selection()
@@ -1120,6 +1176,7 @@ class EasyStackupApp:
             self.all_faces.append(end_x_model)
         self.current_face_x = end_x_model
 
+        self._invalidate_analysis()
         self._mark_dirty()
         self.redraw_canvas()
         self.update_ui()
@@ -1309,6 +1366,7 @@ class EasyStackupApp:
         if self.has_gap and not length_changed:
             self._sync_gap_arrow()
 
+        self._invalidate_analysis()
         self._mark_dirty()
         self.redraw_canvas()
         self.update_ui()
@@ -1374,6 +1432,7 @@ class EasyStackupApp:
             self.has_gap = False
             self._restore_active_face()
 
+        self._invalidate_analysis()
         self._mark_dirty()
         self._rebuild_faces()
         self.redraw_canvas()
@@ -1424,6 +1483,7 @@ class EasyStackupApp:
 
         self.has_gap = True
         self.current_face_x = None
+        self._invalidate_analysis()
         self._mark_dirty()
         self.redraw_canvas()
         self.update_ui()
@@ -1606,15 +1666,21 @@ class EasyStackupApp:
         self._apply_zoom(1 / 1.15)
 
     def reset_zoom(self):
+        """Reset the view: fit the loop if there is one, otherwise 1:1 at the origin."""
+        if self.project.arrows:
+            self._fit_loop_in_view()
+            return
         self.zoom = 1.0
         self.offset_x = 0.0
         self.offset_y = 0.0
         self.redraw_canvas()
 
     def _apply_zoom(self, factor):
-        new_zoom = self.zoom * factor
-        if not (0.4 <= new_zoom <= 3.0):
+        if factor > 1 and self.zoom >= _MAX_ZOOM:
             return
+        if factor < 1 and self.zoom <= _MIN_ZOOM:
+            return
+        new_zoom = max(_MIN_ZOOM, min(_MAX_ZOOM, self.zoom * factor))
 
         # Always zoom toward the current center of the canvas
         cx = self.canvas.winfo_width() / 2
@@ -1630,6 +1696,75 @@ class EasyStackupApp:
         self.zoom = new_zoom
         self.redraw_canvas()
 
+    def _on_canvas_configure(self, _event=None):
+        if self._try_fit_loop_in_view():
+            return
+        self._draw_fixed_overlays()
+
+    def _loop_model_bounds(self) -> Optional[Tuple[float, float, float, float]]:
+        """Axis-aligned bounds of faces + arrows in model space (including labels)."""
+        xs: list[float] = list(self.all_faces)
+        ys: list[float] = []
+        for a in self.project.arrows:
+            xs.extend((a.start_x, a.end_x))
+            ys.extend((a.start_y, a.end_y))
+            if a.is_gap:
+                xs.append(max(a.start_x, a.end_x) + 36.0)
+            else:
+                ys.append(min(a.start_y, a.end_y) - 18.0)
+        if not xs:
+            return None
+        if not ys:
+            ys.extend((200.0, 500.0))
+        xmin, xmax = min(xs), max(xs)
+        ymin, ymax = min(ys) - 30.0, max(ys) + 30.0
+        if xmax <= xmin:
+            xmax = xmin + 1.0
+        if ymax <= ymin:
+            ymax = ymin + 1.0
+        return xmin, ymin, xmax, ymax
+
+    def _try_fit_loop_in_view(self, _event=None) -> bool:
+        """Run a pending fit once the canvas has a real size. Returns True if it ran."""
+        if not self._fit_pending:
+            return False
+        try:
+            if not self.root.winfo_exists() or not self.canvas.winfo_exists():
+                self._fit_pending = False
+                return False
+        except Exception:
+            self._fit_pending = False
+            return False
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        if w < 50 or h < 50:
+            self.root.after(50, self._try_fit_loop_in_view)
+            return False
+        self._fit_pending = False
+        self._fit_loop_in_view()
+        return True
+
+    def _fit_loop_in_view(self) -> None:
+        """Center the loop on its centroid and zoom so the whole diagram is visible."""
+        bounds = self._loop_model_bounds()
+        if bounds is None:
+            self.redraw_canvas()
+            return
+        xmin, ymin, xmax, ymax = bounds
+        w = max(self.canvas.winfo_width(), 50)
+        h = max(self.canvas.winfo_height(), 50)
+        usable_w = max(40.0, w * (1.0 - 2.0 * _FIT_MARGIN))
+        usable_h = max(40.0, h * (1.0 - 2.0 * _FIT_MARGIN))
+        span_x = max(xmax - xmin, 1.0)
+        span_y = max(ymax - ymin, 1.0)
+        zoom = min(usable_w / span_x, usable_h / span_y)
+        self.zoom = max(_MIN_ZOOM, min(_MAX_ZOOM, zoom))
+        cx = 0.5 * (xmin + xmax)
+        cy = 0.5 * (ymin + ymax)
+        self.offset_x = w / 2.0 - cx * self.zoom
+        self.offset_y = h / 2.0 - cy * self.zoom
+        self.redraw_canvas()
+
     def clear_all(self):
         had_content = bool(self.project.arrows)
         self.project.arrows.clear()
@@ -1638,10 +1773,38 @@ class EasyStackupApp:
         # Fresh empty diagram uses the shared default origin
         self.original_start_x = DEFAULT_ORIGIN_X
         self.reset_faces()
+        self.zoom = 1.0
+        self.offset_x = 0.0
+        self.offset_y = 0.0
+        self._invalidate_analysis()
         if had_content:
             self._mark_dirty()
         self.redraw_canvas()
         self.update_ui()
+
+    def _on_delete_key(self, _event=None):
+        """Delete the selected dimension, but never steal Backspace from a text field."""
+        try:
+            widget = self.root.focus_get()
+            if widget is not None:
+                cls = str(widget.winfo_class())
+                if cls in ("Entry", "Text", "TEntry") or "entry" in cls.lower():
+                    return
+        except Exception:
+            pass
+        self.delete_selected()
+
+    def _on_ctrl_s(self, _event=None):
+        # bind_all fires even when a modal has grab. Silent-save is fine;
+        # opening Save As under a grabbed dialog is not.
+        try:
+            grab = self.root.grab_current()
+        except Exception:
+            grab = None
+        if grab is not None and not self.file_path:
+            return "break"
+        self.save_project_file()
+        return "break"
 
     def save_project_file(self) -> bool:
         """Save to the current path, or open Save As if none yet. Returns True on success."""
@@ -1687,11 +1850,6 @@ class EasyStackupApp:
             self.file_path = path
             self._clear_dirty()
             self._update_window_title()
-            messagebox.showinfo(
-                "Saved",
-                f"Project saved to:\n{path}",
-                parent=self.root,
-            )
             return True
         except Exception as exc:
             messagebox.showerror(
@@ -1707,13 +1865,26 @@ class EasyStackupApp:
         "#a855f7", "#06b6d4", "#f97316", "#84cc16",
     )
 
+    def _invalidate_analysis(self):
+        """Drop stored WC/RSS and Monte Carlo snapshots (loop no longer matches)."""
+        self.project.calculation = None
+        self.project.monte_carlo = None
+        self._clear_results()
+
     def calculate(self):
         # Only valid for a closed loop (gap placed)
         if not self.has_gap:
             return
 
         results = self.calculator.calculate(self.project)
+        if self.project.calculation != results:
+            self.project.calculation = results
+            self._mark_dirty()
+        self._render_calculation(results)
 
+    def _render_calculation(self, results: dict):
+        if not hasattr(self, "result_frame"):
+            return
         for widget in self.result_frame.winfo_children():
             widget.destroy()
 
@@ -1823,6 +1994,8 @@ class EasyStackupApp:
             self.calc_btn.configure(state="normal")
         else:
             self.calc_btn.configure(state="disabled")
+            self.project.calculation = None
+            self.project.monte_carlo = None
             self._clear_results()
 
     def _dimensions_heading(self) -> str:

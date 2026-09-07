@@ -6,7 +6,7 @@ import customtkinter as ctk
 
 # Single place to bump the displayed app version
 APP_NAME = "EasyStackup"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 
 
 class AboutDialog(ctk.CTkToplevel):
@@ -45,8 +45,8 @@ class AboutDialog(ctk.CTkToplevel):
             self,
             text=(
                 "A desktop tool for 1D mechanical tolerance stack-up analysis.\n"
-                "Build closed dimension loops, evaluate worst-case and RSS\n"
-                "results, and export reports and loop diagrams."
+                "Build closed dimension loops, evaluate worst-case, RSS, and\n"
+                "Monte Carlo results, and export reports and loop diagrams."
             ),
             justify="left",
             font=ctk.CTkFont(size=13),
